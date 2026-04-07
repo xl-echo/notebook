@@ -1,0 +1,4 @@
+owner: xl-echo
+repo: notebook
+provider: github
+updaterCacheDirName: securenotes-updater

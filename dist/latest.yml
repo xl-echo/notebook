@@ -1,0 +1,8 @@
+version: 1.0.0
+files:
+  - url: SecureNotes-Setup-1.0.0.exe
+    sha512: C64m3/6XFucUBksO26aVrU+ZUdyT2UbQtsMrO0cD/tifsmifFCwOeX7XVNiKAu6K3C3W1ehGnzWU1EWmcvPW8g==
+    size: 79010048
+path: SecureNotes-Setup-1.0.0.exe
+sha512: C64m3/6XFucUBksO26aVrU+ZUdyT2UbQtsMrO0cD/tifsmifFCwOeX7XVNiKAu6K3C3W1ehGnzWU1EWmcvPW8g==
+releaseDate: '2026-04-07T03:19:41.679Z'
