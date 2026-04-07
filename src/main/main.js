@@ -35,6 +35,19 @@ const foldersIPC = require('./ipc/folders');
 
 let mainWindow = null;
 
+// 单例：防止多开
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 function createWindow() {
   const iconPath = path.join(__dirname, '..', 'renderer', 'assets', 'icon.ico');
 

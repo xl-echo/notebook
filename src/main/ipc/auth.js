@@ -86,8 +86,11 @@ function registerAuthHandlers(window) {
       return { success: false, error: '用户名或密码错误' };
     }
 
+    // 登录成功，设置密码
+    const oldPwd = storage.getPassword();
     storage.setPassword(passwordHash);
     storage.clearLock();
+    console.log('[auth] 登录成功, 旧密码:' + (oldPwd ? '已设置' : 'NULL') + ', 新密码hash:' + passwordHash.substring(0, 16) + '...');
     return { success: true, username: config.username };
   });
 

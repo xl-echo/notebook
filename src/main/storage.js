@@ -10,6 +10,20 @@ const NodeCrypto = require('crypto');  // Node.js 原生 crypto 模块
 let DATA_DIR = null;
 let currentPassword = null;
 
+// 日志文件路径
+const LOG_FILE = path.join(os.homedir(), '.SecureNotes', 'debug.log');
+
+// 写入日志
+function writeLog(level, tag, message) {
+  const time = new Date().toISOString();
+  const logLine = `[${time}] [${level}] [${tag}] ${message}\n`;
+  try {
+    fs.appendFileSync(LOG_FILE, logLine);
+  } catch (e) {
+    console.error('日志写入失败:', e);
+  }
+}
+
 const CONFIG_DIR = path.join(os.homedir(), '.SecureNotes');
 const PATH_INFO_FILE = path.join(CONFIG_DIR, 'path.inf');
 
@@ -182,7 +196,7 @@ function loadImage(id) {
     const iv = data.slice(22, 38);
     const encrypted = data.slice(38);
     const key = crypto.deriveKey(currentPassword, salt);
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    const decipher = NodeCrypto.createDecipheriv('aes-256-cbc', key, iv);
     return Buffer.concat([decipher.update(encrypted), decipher.final()]);
   } catch (e) {
     return null;
@@ -196,43 +210,81 @@ function deleteImage(id) {
 
 // 保存文件（加密）
 function saveFile(id, buffer, metadata) {
-  console.log('[storage] saveFile 目录状态: DATA_DIR=' + DATA_DIR);
+  writeLog('INFO', 'storage', '=== saveFile 开始 ===');
+  writeLog('INFO', 'storage', 'DATA_DIR=' + DATA_DIR);
+  writeLog('INFO', 'storage', 'currentPassword=' + (currentPassword ? '已设置(' + currentPassword.length + ')' : 'NULL'));
+  writeLog('INFO', 'storage', '文件ID=' + id + ', buffer大小=' + buffer.length);
+  writeLog('INFO', 'storage', 'metadata=' + JSON.stringify(metadata));
+  
+  if (!currentPassword) {
+    writeLog('ERROR', 'storage', 'saveFile失败: currentPassword为空');
+    throw new Error('未登录');
+  }
+  if (!DATA_DIR) {
+    writeLog('ERROR', 'storage', 'saveFile失败: DATA_DIR为空');
+    throw new Error('数据目录未设置');
+  }
+  
   const salt = NodeCrypto.randomBytes(16);
   const key = crypto.deriveKey(currentPassword, salt);
   const iv = NodeCrypto.randomBytes(16);
   const cipher = NodeCrypto.createCipheriv('aes-256-cbc', key, iv);
   const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
-  // 存储格式: SNFILE: + salt(16) + iv(16) + json长度(2) + json(metadata) + 加密数据
+  // 存储格式: SNFILE(6字节) + salt(16) + iv(16) + json长度(2) + json(metadata) + 加密数据
   const metaJson = JSON.stringify(metadata);
   const metaLen = Buffer.alloc(2);
   metaLen.writeUInt16BE(metaJson.length);
   const metaBuffer = Buffer.from(metaJson, 'utf8');
   const output = Buffer.concat([Buffer.from('SNFILE'), salt, iv, metaLen, metaBuffer, encrypted]);
   const filePath = getFileFile(id);
-  console.log('[storage] saveFile 保存路径: ' + filePath);
+  writeLog('INFO', 'storage', '保存路径=' + filePath);
+  writeLog('INFO', 'storage', 'output大小=' + output.length);
+  
   fs.writeFileSync(filePath, output);
+  writeLog('INFO', 'storage', '=== saveFile 完成 ===');
 }
 
 // 加载文件（解密）
 function loadFile(id) {
+  writeLog('INFO', 'storage', '=== loadFile 开始 ===');
+  writeLog('INFO', 'storage', '文件ID=' + id);
+  writeLog('INFO', 'storage', 'currentPassword=' + (currentPassword ? '已设置' : 'NULL'));
+  
   const file = getFileFile(id);
-  if (!fs.existsSync(file)) return null;
+  writeLog('INFO', 'storage', '文件路径=' + file);
+  writeLog('INFO', 'storage', '文件是否存在=' + fs.existsSync(file));
+  
+  if (!fs.existsSync(file)) {
+    writeLog('ERROR', 'storage', '文件不存在: ' + file);
+    return null;
+  }
   try {
     const data = fs.readFileSync(file);
-    const salt = data.slice(7, 23);
-    const iv = data.slice(23, 39);
-    const metaLen = data.readUInt16BE(39);
-    const metaJson = data.slice(41, 41 + metaLen).toString('utf8');
-    const encrypted = data.slice(41 + metaLen);
+    writeLog('INFO', 'storage', '文件大小=' + data.length);
+    // SNFILE 是 6 字节，偏移从 6 开始
+    const salt = data.slice(6, 22);
+    const iv = data.slice(22, 38);
+    const metaLen = data.readUInt16BE(38);
+    writeLog('INFO', 'storage', 'salt长度=' + salt.length + ', iv长度=' + iv.length + ', metaLen=' + metaLen);
+    const metaJson = data.slice(40, 40 + metaLen).toString('utf8');
+    const encrypted = data.slice(40 + metaLen);
+    writeLog('INFO', 'storage', '加密数据大小=' + encrypted.length);
+    
     const key = crypto.deriveKey(currentPassword, salt);
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    writeLog('INFO', 'storage', 'deriveKey完成');
+    const decipher = NodeCrypto.createDecipheriv('aes-256-cbc', key, iv);
     const buffer = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    writeLog('INFO', 'storage', '解密后buffer大小=' + buffer.length);
     const metadata = JSON.parse(metaJson);
+    writeLog('INFO', 'storage', 'metadata=' + JSON.stringify(metadata));
+    writeLog('INFO', 'storage', '=== loadFile 完成 ===');
     return {
       ...metadata,
       data: `data:${metadata.type || 'application/octet-stream'};base64,${buffer.toString('base64')}`
     };
   } catch (e) {
+    writeLog('ERROR', 'storage', 'loadFile异常: ' + e.message);
+    writeLog('ERROR', 'storage', 'stack: ' + e.stack);
     return null;
   }
 }

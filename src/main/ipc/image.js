@@ -106,11 +106,19 @@ function registerImageHandlers() {
   // 加载文件（解密并返回）
   ipcMain.handle('file-load', async (event, fileId) => {
     const password = storage.getPassword();
-    if (!password) return null;
+    if (!password) {
+      console.log('[后端] file-load 失败: 未登录, password=' + (password ? '已设置' : 'NULL'));
+      return null;
+    }
+    console.log('[后端] file-load 开始, fileId=' + fileId + ', password长度=' + password.length);
 
     const result = storage.loadFile(fileId);
-    if (!result) return null;
+    if (!result) {
+      console.log('[后端] file-load 返回null, fileId=' + fileId);
+      return null;
+    }
 
+    console.log('[后端] file-load 成功, fileId=' + fileId + ', data长度=' + result.data?.length);
     return result;
   });
 
