@@ -62,17 +62,25 @@ function registerAuthHandlers(window) {
 
   ipcMain.handle('auth-login', async (event, { username, password }) => {
     const lockInfo = storage.getLockInfo();
-    if (lockInfo) {
-      const remainingTime = Math.ceil((LOCK_DURATION_MS - (Date.now() - lockInfo.lockedAt)) / 1000);
-      return { success: false, error: `密码错误过多，请 ${remainingTime} 秒后重试`, locked: true, remainingTime };
+    if (lockInfo && lockInfo.failedCount >= MAX_FAILED_ATTEMPTS) {
+      const elapsed = Date.now() - lockInfo.lockedAt;
+      if (elapsed < LOCK_DURATION_MS) {
+        const remainingTime = Math.ceil((LOCK_DURATION_MS - elapsed) / 1000);
+        return { success: false, error: `密码错误过多，请 ${remainingTime} 秒后重试`, locked: true, remainingTime };
+      }
+      // 锁定时间已过，自动清除
+      storage.clearLock();
     }
 
     if (!username || !password) return { success: false, error: '请输入用户名和密码' };
 
     const passwordHash = storage.hashPassword(password);
     const config = storage.loadConfig(passwordHash);
+    const currentLockInfo = storage.getLockInfo();
+    const prevFailed = currentLockInfo ? currentLockInfo.failedCount : 0;
+
     if (!config) {
-      const failedCount = lockInfo ? lockInfo.failedCount + 1 : 1;
+      const failedCount = prevFailed + 1;
       storage.setLockInfo(failedCount);
       if (failedCount >= MAX_FAILED_ATTEMPTS) {
         return { success: false, error: `密码错误 ${failedCount} 次，临时锁定 30 秒`, locked: true, remainingTime: 30 };
@@ -81,12 +89,15 @@ function registerAuthHandlers(window) {
     }
 
     if (config.username !== username) {
-      const failedCount = lockInfo ? lockInfo.failedCount + 1 : 1;
+      const failedCount = prevFailed + 1;
       storage.setLockInfo(failedCount);
-      return { success: false, error: '用户名或密码错误' };
+      if (failedCount >= MAX_FAILED_ATTEMPTS) {
+        return { success: false, error: `密码错误 ${failedCount} 次，临时锁定 30 秒`, locked: true, remainingTime: 30 };
+      }
+      return { success: false, error: `用户名或密码错误，剩余尝试次数: ${MAX_FAILED_ATTEMPTS - failedCount}` };
     }
 
-    // 登录成功，设置密码
+    // 登录成功
     const oldPwd = storage.getPassword();
     storage.setPassword(passwordHash);
     storage.clearLock();

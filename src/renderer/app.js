@@ -189,8 +189,11 @@ function bindButtonEvents() {
   document.getElementById('rename-ok')?.addEventListener('click', confirmRename);
   document.getElementById('rename-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') closeRenameModal(); });
 
+  // 笔记右键菜单
+  document.getElementById('ctx-delete-note')?.addEventListener('click', deleteNoteCtx);
+
   // 关闭右键菜单
-  document.addEventListener('click', () => hideContextMenu());
+  document.addEventListener('click', () => { hideContextMenu(); hideNoteContextMenu(); });
   document.addEventListener('contextmenu', e => e.preventDefault());
 
   // 笔记输入
@@ -303,23 +306,48 @@ async function finishInstall() {
 }
 
 // === 登录 ===
+let loginLockTimer = null;
+
 async function doLogin() {
   const username = document.getElementById('login-username').value.trim();
   const password = document.getElementById('login-password').value;
   const errorEl = document.getElementById('login-error');
+  const btn = document.getElementById('btn-login');
+
   errorEl.textContent = '';
   if (!username || !password) { errorEl.textContent = '请输入用户名和密码'; return; }
 
+  // 如果正在锁定倒计时，禁止提交
+  if (btn.disabled) return;
+
   const result = await window.api.login({ username, password });
   if (result.success) {
+    // 清理锁定状态
+    if (loginLockTimer) { clearInterval(loginLockTimer); loginLockTimer = null; }
+    btn.disabled = false;
+    btn.textContent = '登 录';
     showPage('app-page');
     initApp(username);
   } else {
     errorEl.textContent = result.error;
-    if (result.locked) {
-      setTimeout(() => {
-        if (document.getElementById('login-page').classList.contains('active')) doLogin();
-      }, result.remainingTime * 1000);
+    if (result.locked && result.remainingTime > 0) {
+      // 禁用登录按钮并倒计时
+      if (loginLockTimer) clearInterval(loginLockTimer);
+      let remaining = result.remainingTime;
+      btn.disabled = true;
+      btn.textContent = `等待 ${remaining}s`;
+      loginLockTimer = setInterval(() => {
+        remaining--;
+        if (remaining <= 0) {
+          clearInterval(loginLockTimer);
+          loginLockTimer = null;
+          btn.disabled = false;
+          btn.textContent = '登 录';
+          errorEl.textContent = '可以重新尝试登录';
+        } else {
+          btn.textContent = `等待 ${remaining}s`;
+        }
+      }, 1000);
     }
   }
 }
@@ -361,6 +389,11 @@ function clearCurrentNote() {
   imageCache.clear();
   document.getElementById('login-username').value = '';
   document.getElementById('login-password').value = '';
+  document.getElementById('login-error').textContent = '';
+  // 重置登录按钮状态
+  const btn = document.getElementById('btn-login');
+  if (btn) { btn.disabled = false; btn.textContent = '登 录'; }
+  if (loginLockTimer) { clearInterval(loginLockTimer); loginLockTimer = null; }
 }
 
 // === 笔记列表 ===
@@ -385,6 +418,12 @@ async function loadNotes(sortBy = null, order = null) {
     folders = meta.folders || [];
     noteFolders = meta.noteFolders || {};
     noteOrder = meta.noteOrder || [];
+    // 默认将所有文件夹设置为收起状态（如果没有记录）
+    folders.forEach(f => {
+      if (collapsedFolders[f.id] === undefined) {
+        collapsedFolders[f.id] = true;
+      }
+    });
   }
 
   renderNotesList();
@@ -498,6 +537,13 @@ function bindNotesListEvents(el) {
       if (e.target.closest('.drag-handle')) return;
       const noteId = item.dataset.noteId;
       if (noteId) openNote(noteId);
+    });
+    // 笔记右键菜单
+    item.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const noteId = item.dataset.noteId;
+      showNoteContextMenu(e, noteId);
     });
   });
 
@@ -734,6 +780,51 @@ function showFolderContextMenu(e, folderId) {
 function hideContextMenu() {
   document.getElementById('context-menu').classList.add('hidden');
   contextTarget = null;
+}
+
+// === 笔记右键菜单 ===
+let noteContextTarget = null;
+
+function showNoteContextMenu(e, noteId) {
+  noteContextTarget = noteId;
+  const menu = document.getElementById('note-context-menu');
+  menu.classList.remove('hidden');
+  const x = Math.min(e.clientX, window.innerWidth - 160);
+  const y = Math.min(e.clientY, window.innerHeight - 60);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+}
+
+function hideNoteContextMenu() {
+  const menu = document.getElementById('note-context-menu');
+  if (menu) menu.classList.add('hidden');
+  noteContextTarget = null;
+}
+
+async function deleteNoteCtx() {
+  const noteId = noteContextTarget;
+  hideNoteContextMenu();
+  if (!noteId) return;
+  const note = allNotes.find(n => n.id === noteId);
+  const title = note ? (note.title || '无标题') : '此笔记';
+  if (!confirm(`确定要删除「${title}」吗？`)) return;
+
+  await window.api.notesDelete(noteId);
+
+  // 如果删的是当前打开的笔记，清空编辑区
+  if (currentNote && currentNote.id === noteId) {
+    currentNote = null;
+    isDirty = false;
+    imageCache.clear();
+    document.getElementById('editor-panel').classList.add('hidden');
+    document.getElementById('welcome-panel').classList.remove('hidden');
+    document.getElementById('note-title').value = '';
+    document.getElementById('note-content').value = '';
+  }
+
+  await loadNotes();
+  updateWelcomeStats();
+  showToast('已删除', 'success');
 }
 
 function renameFolder() {

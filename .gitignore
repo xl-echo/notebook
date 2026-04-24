@@ -12,3 +12,7 @@ Thumbs.db
 # 编辑器
 .vscode/
 .idea/
+
+# Electron 构建产物
+dist/
+out/
