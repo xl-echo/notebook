@@ -75,7 +75,7 @@ function registerImageHandlers() {
     console.log('[后端] file-save 密码状态: ' + (password ? '已设置' : '未设置'));
     if (!password) {
       console.log('[后端] file-save 失败: 未登录');
-      return null;
+      return { __error: 'NOT_LOGGED_IN', __message: '请先登录' };
     }
 
     // 兼容 dataUrl 和 fileDataUrl 两种参数名
@@ -84,23 +84,28 @@ function registerImageHandlers() {
     
     if (!sourceUrl) {
       console.log('[后端] file-save 失败: 没有数据');
-      return null;
+      return { __error: 'NO_DATA', __message: '没有文件数据' };
     }
     
     // 解析 data URL
     const matches = sourceUrl.match(/^data:([^;]+);base64,(.+)$/);
     if (!matches) {
       console.log('[后端] file-save 失败: URL格式错误');
-      return null;
+      return { __error: 'INVALID_DATA', __message: '文件数据格式错误' };
     }
 
-    const buffer = Buffer.from(matches[2], 'base64');
-    const fileId = 'file_' + Date.now() + '_' + generateUUID().substr(0, 8);
-    console.log('[后端] file-save 保存文件ID: ' + fileId + ' 大小:' + buffer.length);
-    storage.saveFile(fileId, buffer, { name: fileName, type: fileType });
-    
-    console.log('[后端] file-save 成功');
-    return { id: fileId, name: fileName, type: fileType };
+    try {
+      const buffer = Buffer.from(matches[2], 'base64');
+      const fileId = 'file_' + Date.now() + '_' + generateUUID().substr(0, 8);
+      console.log('[后端] file-save 保存文件ID: ' + fileId + ' 大小:' + buffer.length);
+      storage.saveFile(fileId, buffer, { name: fileName, type: fileType });
+      
+      console.log('[后端] file-save 成功');
+      return { id: fileId, name: fileName, type: fileType };
+    } catch (e) {
+      console.log('[后端] file-save 异常: ' + e.message);
+      return { __error: 'SAVE_FAILED', __message: '文件保存失败: ' + e.message };
+    }
   });
 
   // 加载文件（解密并返回）
@@ -108,18 +113,52 @@ function registerImageHandlers() {
     const password = storage.getPassword();
     if (!password) {
       console.log('[后端] file-load 失败: 未登录, password=' + (password ? '已设置' : 'NULL'));
-      return null;
+      return { __error: 'NOT_LOGGED_IN', __message: '请先登录后再下载文件' };
     }
     console.log('[后端] file-load 开始, fileId=' + fileId + ', password长度=' + password.length);
 
     const result = storage.loadFile(fileId);
+
     if (!result) {
       console.log('[后端] file-load 返回null, fileId=' + fileId);
-      return null;
+      return { __error: 'UNKNOWN', __message: '文件加载失败，未知错误' };
     }
 
-    console.log('[后端] file-load 成功, fileId=' + fileId + ', data长度=' + result.data?.length);
+    // 检查是否为错误返回（__error 字段表示加载失败）
+    if (result.__error) {
+      console.log('[后端] file-load 失败: ' + result.__error + ' - ' + result.__message);
+      return result;  // 透传错误信息到前端
+    }
+
+    console.log('[后端] file-load 成功, fileId=' + fileId + ', data长度=' + (result.data ? result.data.length : 0));
     return result;
+  });
+
+  // 文件诊断（不加载完整内容，只检查文件状态）
+  ipcMain.handle('file-diagnose', async (event, fileId) => {
+    const password = storage.getPassword();
+    console.log('[后端] file-diagnose 开始, fileId=' + fileId);
+    
+    if (!password) {
+      return { __error: 'NOT_LOGGED_IN', __message: '请先登录' };
+    }
+
+    const info = storage.getFileInfo(fileId);
+    if (info.error) {
+      console.log('[后端] file-diagnose: ' + info.error);
+      return info;
+    }
+
+    // 尝试完整加载以获取更详细的错误
+    const loadResult = storage.loadFile(fileId);
+    if (loadResult.__error) {
+      info.loadError = loadResult.__error;
+      info.loadMessage = loadResult.__message;
+    } else {
+      info.loadable = true;
+    }
+
+    return info;
   });
 
   // 删除文件

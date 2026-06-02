@@ -1138,27 +1138,143 @@ async function loadPreviewImages(container) {
     const id = attachment.dataset.fileId;
     if (!fileCache.has(id)) {
       const fileData = await window.api.fileLoad(id);
-      if (fileData) fileCache.set(id, fileData);
+      // 只有成功加载（没有 __error 字段）才缓存
+      if (fileData && !fileData.__error) {
+        fileCache.set(id, fileData);
+      } else if (fileData && fileData.__error) {
+        // 文件加载失败，在 UI 上标记为不可用
+        markAttachmentError(attachment, fileData);
+      }
     }
+  }
+}
+
+// 标记附件为错误状态
+function markAttachmentError(attachment, errorData) {
+  const btn = attachment.querySelector('.file-download-btn');
+  if (btn) {
+    btn.classList.add('error');
+    btn.textContent = '无法下载';
+    btn.title = errorData.__message || '文件加载失败';
+    btn.onclick = function() {
+      showFileLoadError(errorData, attachment.dataset.fileId);
+    };
+  }
+}
+
+// 显示文件加载错误的详细信息
+function showFileLoadError(errorData, fileId) {
+  const errorCode = errorData.__error || 'UNKNOWN';
+  const message = errorData.__message || '文件加载失败';
+  let detail = '';
+
+  switch (errorCode) {
+    case 'CHECKSUM_MISMATCH':
+      detail = '\n\n\u539f\u56e0\uff1a\u52a0\u5bc6\u6587\u4ef6\u5728\u78c1\u76d8\u4e0a\u53d1\u751f\u4e86\u9759\u9ed8\u635f\u574f\uff08\u6821\u9a8c\u548c\u4e0d\u5339\u914d\uff09\u3002\u8fd9\u53ef\u80fd\u662f\u7531\u4e8e\u7cfb\u7edf\u610f\u5916\u5173\u673a\u3001\u9632\u75c5\u6bd2\u8f6f\u4ef6\u5e72\u6270\u6216\u78c1\u76d8\u9519\u8bef\u5bfc\u81f4\u7684\u3002\n\n\u5efa\u8bae\uff1a\u5982\u679c\u60a8\u6709\u5907\u4efd\uff0c\u8bf7\u4ece\u5907\u4efd\u4e2d\u6062\u590d\u6b64\u6587\u4ef6\u3002\u5426\u5219\u9700\u8981\u91cd\u65b0\u4e0a\u4f20\u6b64\u6587\u4ef6\u3002';
+      break;
+    case 'DECRYPT_FAILED':
+      detail = '\n\n\u539f\u56e0\uff1a\u6587\u4ef6\u89e3\u5bc6\u5931\u8d25\uff0c\u5bc6\u7801\u53ef\u80fd\u4e0d\u6b63\u786e\u6216\u6587\u4ef6\u5df2\u635f\u574f\u3002';
+      break;
+    case 'FILE_NOT_FOUND':
+      detail = '\n\n\u539f\u56e0\uff1a\u5bf9\u5e94\u7684\u52a0\u5bc6\u6587\u4ef6\u5728\u78c1\u76d8\u4e0a\u5df2\u4e0d\u5b58\u5728\u3002\u53ef\u80fd\u88ab\u8bef\u5220\u9664\u6216\u6570\u636e\u76ee\u5f55\u53d1\u751f\u4e86\u53d8\u5316\u3002';
+      break;
+    case 'DECRYPT_CHECKSUM_MISMATCH':
+      detail = '\n\n\u539f\u56e0\uff1a\u89e3\u5bc6\u540e\u6570\u636e\u6821\u9a8c\u548c\u4e0d\u5339\u914d\u3002\u53ef\u80fd\u662f\u5bc6\u7801\u4e0d\u6b63\u786e\uff08\u60a8\u662f\u5426\u66fe\u4fee\u6539\u8fc7\u5bc6\u7801\uff1f\uff09\uff0c\u6216\u6587\u4ef6\u5df2\u635f\u574f\u3002';
+      break;
+    case 'INVALID_FORMAT':
+      detail = '\n\n\u539f\u56e0\uff1a\u6587\u4ef6\u683c\u5f0f\u65e0\u6548\uff0c\u53ef\u80fd\u5df2\u635f\u574f\u6216\u662f\u975e SecureNotes \u6587\u4ef6\u3002';
+      break;
+    case 'META_PARSE_ERROR':
+      detail = '\n\n\u539f\u56e0\uff1a\u6587\u4ef6\u5143\u6570\u636e\u635f\u574f\uff0c\u65e0\u6cd5\u89e3\u6790\u6587\u4ef6\u4fe1\u606f\u3002';
+      break;
+  }
+
+  // 显示确认对话框
+  if (confirm(message + detail + '\n\n\u662f\u5426\u5c1d\u8bd5\u8bca\u65ad\u6b64\u6587\u4ef6\u7684\u72b6\u6001\uff1f')) {
+    diagnoseFile(fileId);
+  }
+}
+
+// 诊断文件状态
+async function diagnoseFile(fileId) {
+  showToast('\u6b63\u5728\u8bca\u65ad\u6587\u4ef6\u72b6\u6001...', 'info');
+  try {
+    const info = await window.api.fileDiagnose(fileId);
+    if (info.error) {
+      showToast('\u8bca\u65ad\u5931\u8d25: ' + (info.message || info.error), 'error');
+      return;
+    }
+    const lines = [
+      '\u6587\u4ef6\u8bca\u65ad\u7ed3\u679c:',
+      '\u6587\u4ef6ID: ' + info.id,
+      '\u6587\u4ef6\u5927\u5c0f: ' + (info.fileSize || '?') + ' bytes',
+      '\u683c\u5f0f\u7248\u672c: ' + info.format,
+      '\u5143\u6570\u636e\u957f\u5ea6: ' + info.metaLen + ' bytes',
+      '\u6570\u636e\u957f\u5ea6: ' + info.dataLen + ' bytes',
+      '\u6821\u9a8c\u548c\u4fdd\u62a4: ' + (info.hasChecksum ? '\u6709' : '\u65e0'),
+      '\u53ef\u52a0\u8f7d: ' + (info.loadable ? '\u662f' : '\u5426'),
+    ];
+    if (info.loadError) {
+      lines.push('\u52a0\u8f7d\u9519\u8bef: ' + info.loadError);
+      lines.push('\u9519\u8bef\u8be6\u60c5: ' + info.loadMessage);
+    }
+    if (info.metadata) {
+      lines.push('\u6587\u4ef6\u540d: ' + (info.metadata.name || '?'));
+      lines.push('\u6587\u4ef6\u7c7b\u578b: ' + (info.metadata.type || '?'));
+      if (info.metadata._checksum) {
+        lines.push('\u539f\u59cb\u6570\u636e\u6821\u9a8c\u548c: ' + info.metadata._checksum);
+      }
+    }
+    alert(lines.join('\n'));
+  } catch (e) {
+    showToast('\u8bca\u65ad\u5931\u8d25: ' + e.message, 'error');
   }
 }
 
 // 下载文件
 async function downloadFile(fileId) {
-  const fileData = fileCache.get(fileId) || await window.api.fileLoad(fileId);
-  if (!fileData) {
-    showToast('文件加载失败', 'error');
+  // 1. 先查缓存
+  const cached = fileCache.get(fileId);
+  if (cached && !cached.__error) {
+    triggerFileDownload(cached);
     return;
   }
 
-  // 创建下载链接
+  // 2. 如果缓存中有错误信息，直接显示
+  if (cached && cached.__error) {
+    showFileLoadError(cached, fileId);
+    return;
+  }
+
+  // 3. 从后端加载
+  showToast('正在加载文件...', 'info');
+  const fileData = await window.api.fileLoad(fileId);
+
+  if (!fileData) {
+    showToast('文件加载失败（未知错误）', 'error');
+    return;
+  }
+
+  // 4. 检查错误返回
+  if (fileData.__error) {
+    fileCache.set(fileId, fileData);  // 缓存错误信息，避免重复请求
+    showFileLoadError(fileData, fileId);
+    return;
+  }
+
+  // 5. 成功加载，缓存并触发下载
+  fileCache.set(fileId, fileData);
+  triggerFileDownload(fileData);
+}
+
+// 触发浏览器下载
+function triggerFileDownload(fileData) {
   const link = document.createElement('a');
   link.href = fileData.data;
   link.download = fileData.name;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-
   showToast(`正在下载: ${fileData.name}`, 'success');
 }
 
@@ -1324,9 +1440,14 @@ async function updateImagePreviewArea() {
   for (const item of imageIds) {
     if (item.isFile) {
       // 文件预览
-      const fileData = fileCache.get(item.id) || await window.api.fileLoad(item.id);
-      if (fileData) {
-        fileCache.set(item.id, fileData);
+      let fileData = fileCache.get(item.id);
+      if (!fileData) {
+        fileData = await window.api.fileLoad(item.id);
+        if (fileData && !fileData.__error) {
+          fileCache.set(item.id, fileData);
+        }
+      }
+      if (fileData && !fileData.__error) {
         previewArea.innerHTML += `
           <div class="file-preview-item" data-file-id="${item.id}">
             <span class="file-icon">📎</span>
@@ -1385,7 +1506,7 @@ async function pasteFile(file) {
       });
       addDebugLog('[pasteFile] fileSave返回: ' + JSON.stringify(result));
       
-      if (result?.id) {
+      if (result && result.id && !result.__error) {
         addDebugLog('[pasteFile] 保存成功, ID:' + result.id);
         // 保存到缓存
         fileCache.set(result.id, {
@@ -1407,6 +1528,9 @@ async function pasteFile(file) {
         // 更新预览区域
         updateImagePreviewArea();
         showToast(`文件「${file.name}」已插入`, 'success');
+      } else if (result && result.__error) {
+        addDebugLog('[pasteFile] 服务端错误: ' + result.__error + ' - ' + result.__message);
+        showToast('文件保存失败: ' + result.__message, 'error');
       } else if (!currentNote) {
         addDebugLog('[pasteFile] 失败: 没有打开的笔记');
         showToast('请先新建或打开笔记', 'warning');

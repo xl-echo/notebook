@@ -1095,6 +1095,13 @@ html, body {
 .file-download-btn:hover {
   background: var(--green-dark);
 }
+.file-download-btn.error {
+  background: var(--danger);
+  cursor: help;
+}
+.file-download-btn.error:hover {
+  background: #c0392b;
+}
 
 /* ===== 欢迎页（新增）===== */
 .welcome-container {

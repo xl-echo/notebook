@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('api', {
   fileSave: (data) => ipcRenderer.invoke('file-save', data),
   fileLoad: (id) => ipcRenderer.invoke('file-load', id),
   fileDelete: (id) => ipcRenderer.invoke('file-delete', id),
+  fileDiagnose: (id) => ipcRenderer.invoke('file-diagnose', id),
 
   // 文件夹 & 元数据
   metaGet: () => ipcRenderer.invoke('meta-get'),

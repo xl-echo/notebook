@@ -208,14 +208,29 @@ function deleteImage(id) {
   if (fs.existsSync(file)) fs.unlinkSync(file);
 }
 
-// 保存文件（加密）
+// ============================================================
+// 文件附件存储（加密 + 完整性校验）
+// ============================================================
+
+// 存储格式 v1: SNFILE(6) + salt(16) + iv(16) + metaLen(2) + metaJson(N) + encrypted(M)
+// 存储格式 v2: SNFLV2(6) + salt(16) + iv(16) + metaLen(2) + metaJson(N) + checksum(32) + encrypted(M)
+
+const FILE_MAGIC_V1 = 'SNFILE';
+const FILE_MAGIC_V2 = 'SNFLV2';
+const FILE_HEADER_LEN = 6;     // 魔数长度
+const FILE_SALT_LEN = 16;
+const FILE_IV_LEN = 16;
+const FILE_METALEN_LEN = 2;
+const FILE_CHECKSUM_LEN = 32;  // SHA256
+
+// 保存文件（加密，v2 格式含完整性校验）
 function saveFile(id, buffer, metadata) {
   writeLog('INFO', 'storage', '=== saveFile 开始 ===');
   writeLog('INFO', 'storage', 'DATA_DIR=' + DATA_DIR);
   writeLog('INFO', 'storage', 'currentPassword=' + (currentPassword ? '已设置(' + currentPassword.length + ')' : 'NULL'));
   writeLog('INFO', 'storage', '文件ID=' + id + ', buffer大小=' + buffer.length);
   writeLog('INFO', 'storage', 'metadata=' + JSON.stringify(metadata));
-  
+
   if (!currentPassword) {
     writeLog('ERROR', 'storage', 'saveFile失败: currentPassword为空');
     throw new Error('未登录');
@@ -224,68 +239,239 @@ function saveFile(id, buffer, metadata) {
     writeLog('ERROR', 'storage', 'saveFile失败: DATA_DIR为空');
     throw new Error('数据目录未设置');
   }
-  
-  const salt = NodeCrypto.randomBytes(16);
+
+  const salt = NodeCrypto.randomBytes(FILE_SALT_LEN);
   const key = crypto.deriveKey(currentPassword, salt);
-  const iv = NodeCrypto.randomBytes(16);
+  const iv = NodeCrypto.randomBytes(FILE_IV_LEN);
   const cipher = NodeCrypto.createCipheriv('aes-256-cbc', key, iv);
   const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
-  // 存储格式: SNFILE(6字节) + salt(16) + iv(16) + json长度(2) + json(metadata) + 加密数据
-  const metaJson = JSON.stringify(metadata);
-  const metaLen = Buffer.alloc(2);
-  metaLen.writeUInt16BE(metaJson.length);
+
+  // 计算原始数据 SHA256 校验和，存入元数据
+  const dataChecksum = NodeCrypto.createHash('sha256').update(buffer).digest('hex');
+
+  // 计算加密数据的 SHA256 校验和，存入文件头
+  const encryptedChecksum = NodeCrypto.createHash('sha256').update(encrypted).digest();
+
+  // 元数据嵌入数据校验和
+  const metaWithChecksum = { ...metadata, _checksum: dataChecksum };
+  const metaJson = JSON.stringify(metaWithChecksum);
   const metaBuffer = Buffer.from(metaJson, 'utf8');
-  const output = Buffer.concat([Buffer.from('SNFILE'), salt, iv, metaLen, metaBuffer, encrypted]);
+  const metaLen = Buffer.alloc(FILE_METALEN_LEN);
+  metaLen.writeUInt16BE(metaBuffer.length);
+
+  // v2 格式：使用 SNFLV2 魔数，在加密数据前插入 32 字节校验和
+  const output = Buffer.concat([
+    Buffer.from(FILE_MAGIC_V2),
+    salt,
+    iv,
+    metaLen,
+    metaBuffer,
+    encryptedChecksum,    // 32 bytes SHA256 of encrypted data
+    encrypted
+  ]);
+
   const filePath = getFileFile(id);
   writeLog('INFO', 'storage', '保存路径=' + filePath);
-  writeLog('INFO', 'storage', 'output大小=' + output.length);
-  
-  fs.writeFileSync(filePath, output);
+  writeLog('INFO', 'storage', 'output大小=' + output.length + ' (格式=v2)');
+
+  // 原子写入：先写临时文件，再 rename
+  const tmpPath = filePath + '.tmp.' + Date.now();
+  fs.writeFileSync(tmpPath, output);
+  // 删除旧文件后重命名，确保原子性
+  if (fs.existsSync(filePath)) {
+    const bakPath = filePath + '.bak';
+    try { fs.unlinkSync(bakPath); } catch (_) {}
+    fs.renameSync(filePath, bakPath);
+    try { fs.unlinkSync(bakPath); } catch (_) {}
+  }
+  fs.renameSync(tmpPath, filePath);
   writeLog('INFO', 'storage', '=== saveFile 完成 ===');
 }
 
-// 加载文件（解密）
+// 读取文件头部信息（不解密内容，用于诊断）
+function getFileInfo(id) {
+  const file = getFileFile(id);
+  if (!fs.existsSync(file)) return { error: 'FILE_NOT_FOUND' };
+
+  try {
+    const data = fs.readFileSync(file);
+    const header = data.slice(0, 6).toString();
+
+    let format;
+    if (header === FILE_MAGIC_V2) {
+      format = 'v2';
+    } else if (header === FILE_MAGIC_V1) {
+      format = 'v1';
+    } else {
+      return { error: 'INVALID_FORMAT', header };
+    }
+
+    const salt = data.slice(6, 22);
+    const iv = data.slice(22, 38);
+    const metaLen = data.readUInt16BE(38);
+
+    const metaStart = FILE_HEADER_LEN + FILE_SALT_LEN + FILE_IV_LEN + FILE_METALEN_LEN;
+    let metaJson, dataLen;
+    if (metaStart + metaLen <= data.length) {
+      metaJson = data.slice(metaStart, metaStart + metaLen).toString('utf8');
+      const contentStart = metaStart + metaLen;
+      if (format === 'v2') {
+        dataLen = data.length - contentStart - FILE_CHECKSUM_LEN;
+      } else {
+        dataLen = data.length - contentStart;
+      }
+    }
+
+    let metadata = null;
+    try { metadata = metaJson ? JSON.parse(metaJson) : null; } catch (_) {}
+
+    return {
+      id,
+      filePath: file,
+      fileSize: data.length,
+      format,
+      metaLen,
+      dataLen,
+      metadata,
+      hasChecksum: format === 'v2'
+    };
+  } catch (e) {
+    return { error: 'READ_ERROR', message: e.message };
+  }
+}
+
+// 加载文件（解密，兼容 v1/v2 格式）
 function loadFile(id) {
   writeLog('INFO', 'storage', '=== loadFile 开始 ===');
   writeLog('INFO', 'storage', '文件ID=' + id);
   writeLog('INFO', 'storage', 'currentPassword=' + (currentPassword ? '已设置' : 'NULL'));
-  
+
   const file = getFileFile(id);
   writeLog('INFO', 'storage', '文件路径=' + file);
   writeLog('INFO', 'storage', '文件是否存在=' + fs.existsSync(file));
-  
-  if (!fs.existsSync(file)) {
-    writeLog('ERROR', 'storage', '文件不存在: ' + file);
-    return null;
+
+  if (!file || !fs.existsSync(file)) {
+    writeLog('ERROR', 'storage', 'loadFile: 文件不存在 - ' + file);
+    return { __error: 'FILE_NOT_FOUND', __message: '加密文件在磁盘上不存在' };
   }
+
+  if (!currentPassword) {
+    writeLog('ERROR', 'storage', 'loadFile: currentPassword为空（未登录）');
+    return { __error: 'NOT_LOGGED_IN', __message: '请先登录后再下载文件' };
+  }
+
   try {
     const data = fs.readFileSync(file);
-    writeLog('INFO', 'storage', '文件大小=' + data.length);
-    // SNFILE 是 6 字节，偏移从 6 开始
-    const salt = data.slice(6, 22);
-    const iv = data.slice(22, 38);
-    const metaLen = data.readUInt16BE(38);
+    writeLog('INFO', 'storage', '文件大小=' + data.length + ' bytes');
+
+    // 验证文件头魔数
+    const header = data.slice(0, 6).toString();
+    let format;
+    if (header === FILE_MAGIC_V2) {
+      format = 'v2';
+    } else if (header === FILE_MAGIC_V1) {
+      format = 'v1';
+    } else {
+      writeLog('ERROR', 'storage', 'loadFile: 文件头无效, header=' + header);
+      return { __error: 'INVALID_FORMAT', __message: '文件格式无效，可能已损坏' };
+    }
+    writeLog('INFO', 'storage', '文件格式=' + format);
+
+    // 解析头部
+    const salt = data.slice(FILE_HEADER_LEN, FILE_HEADER_LEN + FILE_SALT_LEN);
+    const iv = data.slice(FILE_HEADER_LEN + FILE_SALT_LEN, FILE_HEADER_LEN + FILE_SALT_LEN + FILE_IV_LEN);
+    const metaLen = data.readUInt16BE(FILE_HEADER_LEN + FILE_SALT_LEN + FILE_IV_LEN);
+    const metaStart = FILE_HEADER_LEN + FILE_SALT_LEN + FILE_IV_LEN + FILE_METALEN_LEN;
+    const metaJson = data.slice(metaStart, metaStart + metaLen).toString('utf8');
+
     writeLog('INFO', 'storage', 'salt长度=' + salt.length + ', iv长度=' + iv.length + ', metaLen=' + metaLen);
-    const metaJson = data.slice(40, 40 + metaLen).toString('utf8');
-    const encrypted = data.slice(40 + metaLen);
-    writeLog('INFO', 'storage', '加密数据大小=' + encrypted.length);
-    
+
+    // 解析元数据
+    let metadata;
+    try {
+      metadata = JSON.parse(metaJson);
+    } catch (e) {
+      writeLog('ERROR', 'storage', 'loadFile: 元数据JSON解析失败');
+      return { __error: 'META_PARSE_ERROR', __message: '文件元数据损坏' };
+    }
+
+    // 根据格式版本读取加密数据
+    const contentStart = metaStart + metaLen;
+    let encrypted, storedChecksum;
+
+    if (format === 'v2') {
+      storedChecksum = data.slice(contentStart, contentStart + FILE_CHECKSUM_LEN);
+      encrypted = data.slice(contentStart + FILE_CHECKSUM_LEN);
+      writeLog('INFO', 'storage', 'v2: 加密数据大小=' + encrypted.length + ', 存储校验和=' + storedChecksum.toString('hex').substring(0, 16) + '...');
+
+      // 验证加密数据完整性
+      const actualChecksum = NodeCrypto.createHash('sha256').update(encrypted).digest();
+      if (!storedChecksum.equals(actualChecksum)) {
+        writeLog('ERROR', 'storage', 'loadFile: 加密数据校验和不匹配！文件可能已损坏');
+        writeLog('ERROR', 'storage', '  stored=' + storedChecksum.toString('hex'));
+        writeLog('ERROR', 'storage', '  actual=' + actualChecksum.toString('hex'));
+        return {
+          __error: 'CHECKSUM_MISMATCH',
+          __message: '加密文件已损坏（校验和不匹配）。文件数据可能在磁盘上发生了静默损坏，无法恢复。',
+          __name: metadata && metadata.name
+        };
+      }
+      writeLog('INFO', 'storage', '加密数据校验和验证通过');
+    } else {
+      // v1 格式：没有校验和，直接解密
+      encrypted = data.slice(contentStart);
+      writeLog('INFO', 'storage', 'v1: 加密数据大小=' + encrypted.length + ', 无校验和');
+    }
+
+    writeLog('INFO', 'storage', '尝试解密...');
+
+    // 解密
     const key = crypto.deriveKey(currentPassword, salt);
-    writeLog('INFO', 'storage', 'deriveKey完成');
     const decipher = NodeCrypto.createDecipheriv('aes-256-cbc', key, iv);
     const buffer = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-    writeLog('INFO', 'storage', '解密后buffer大小=' + buffer.length);
-    const metadata = JSON.parse(metaJson);
-    writeLog('INFO', 'storage', 'metadata=' + JSON.stringify(metadata));
-    writeLog('INFO', 'storage', '=== loadFile 完成 ===');
+
+    writeLog('INFO', 'storage', '解密成功, buffer大小=' + buffer.length);
+
+    // v2 格式：验证解密后数据校验和
+    if (format === 'v2' && metadata._checksum) {
+      const actualDataChecksum = NodeCrypto.createHash('sha256').update(buffer).digest('hex');
+      if (actualDataChecksum !== metadata._checksum) {
+        writeLog('ERROR', 'storage', 'loadFile: 解密后数据校验和不匹配！');
+        writeLog('ERROR', 'storage', '  expected=' + metadata._checksum);
+        writeLog('ERROR', 'storage', '  actual=' + actualDataChecksum);
+        return {
+          __error: 'DECRYPT_CHECKSUM_MISMATCH',
+          __message: '文件解密失败，可能是密码不正确。如果您未曾修改密码，文件可能已损坏。',
+          __name: metadata.name
+        };
+      }
+      writeLog('INFO', 'storage', '解密后数据校验和验证通过');
+    }
+
+    const fileName = metadata.name || '未知文件';
+    const fileType = metadata.type || 'application/octet-stream';
+    writeLog('INFO', 'storage', '=== loadFile 完成, 文件名=' + fileName + ', 类型=' + fileType);
     return {
-      ...metadata,
-      data: `data:${metadata.type || 'application/octet-stream'};base64,${buffer.toString('base64')}`
+      name: fileName,
+      type: fileType,
+      checksum: metadata._checksum || null,
+      data: `data:${fileType};base64,${buffer.toString('base64')}`
     };
   } catch (e) {
     writeLog('ERROR', 'storage', 'loadFile异常: ' + e.message);
     writeLog('ERROR', 'storage', 'stack: ' + e.stack);
-    return null;
+
+    // 区分异常类型
+    if (e.message && e.message.includes('bad decrypt')) {
+      return { __error: 'DECRYPT_FAILED', __message: '文件解密失败，密码可能不正确或文件已损坏' };
+    }
+    if (e.message && e.message.includes('wrong final block length')) {
+      return { __error: 'DECRYPT_FAILED', __message: '文件解密失败，加密数据长度异常，文件可能已损坏' };
+    }
+    if (e.code === 'ENOENT') {
+      return { __error: 'FILE_NOT_FOUND', __message: '文件已被删除或移动' };
+    }
+    return { __error: 'UNKNOWN', __message: '文件加载失败: ' + e.message };
   }
 }
 
@@ -301,7 +487,7 @@ module.exports = {
   getLockInfo, setLockInfo, clearLock,
   listNotes, saveNote, loadNote, deleteNote,
   saveImage, loadImage, deleteImage,
-  saveFile, loadFile, deleteFile,
+  saveFile, loadFile, deleteFile, getFileInfo,
   loadMeta, saveMeta,
   hashPassword: crypto.hashPassword,
 };
